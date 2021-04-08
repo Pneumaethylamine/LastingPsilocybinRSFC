@@ -1,0 +1,892 @@
+---
+title: "P2PublicationScript"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This is a notebook containing all of the R script used in the production of "Lasting effects of a single psilocybin dose on resting-state functional connectivity in healthy individuals" (McCulloch et al., 2021) 
+
+Please direct any queries to;
+drummond.mcculloch@nru.dk
+or
+patrick.fisher@nru.dk
+
+Load packages
+
+```{r}
+require(ggplot2)
+require(tidyr)
+require(dplyr)
+library(scales)
+library(stringr)
+library(nlme)
+require(R.matlab)
+require(ggbeeswarm)
+require(igraph)
+require(colorRamps)
+require(RColorBrewer)
+require(reshape2)
+require(scales)
+require(parallel)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(writexl)
+library(knitr)
+library(ggpubr)
+
+```
+
+CONNreader is an internal script for organising connectivity structures generated in CONN
+
+```{r}
+#CONNReader
+#Generates 4 functions 
+  #conn
+  #cmObj
+  #cmObj_melt
+  #netConnObj
+```
+
+Withheld Data
+
+```{r}
+#CIMBI_ID is a dataframe with columns denoting participant ID, scna timepoint and acquisition number
+#fname is a CONN output .mat file
+#participants is a dataframe containing acquisitions and timepoints
+#NEOPIR is a dataframe containing participant information, psychological scores and Neocortex BPND
+#Mastertable contains extensive aprticipant information, PET data, personality data and measures of the acute psychedelic experience e.g. MEQ
+```
+
+Establish connectivity strengths
+
+```{r}
+fname <- #data withheld
+
+#the following are functions from "Connreader" by P.M Fisher
+conn <- connLoad(fname)
+cmObj <- cmExtract(conn,atlasname='raichle2011') #change to raichle2011 / shen268 as needed
+cmObj_melt <- cmMelt(cmObj)
+netConnObj <- netConn(cmObj_melt)
+
+RegionNames <- as.character(unique(c(cmObj_melt$z_melt$n2.seed,cmObj_melt$z_melt$n1.seed))) 
+NetworkNames <- as.character(unique(c(cmObj_melt$z_melt$n1.network,cmObj_melt$z_melt$n2.network))) 
+
+d0 <- as.data.frame(rbind(as.data.frame(do.call(rbind, lapply(RegionNames, function(i){rep(i,2)}))),
+      as.data.frame(do.call(rbind,combn(RegionNames, 2, simplify = F))))) 
+
+#rename columns and add numerical equivalents (r1 = nx, r2 = ny)
+colnames(d0) <- c('r1','r2')
+d0$nx <- NA 
+d0$ny <- NA
+d0$ny <- sapply(seq(nrow(d0)), function(i){
+    n1 <- which(RegionNames == as.character(d0[i,'r1']))
+    n2 <- which(RegionNames == as.character(d0[i,'r2']))
+    max(c(n1,n2))
+}) 
+
+d0$nx <- sapply(seq(nrow(d0)), function(i){
+    n1 <- which(RegionNames == as.character(d0[i,'r1']))
+    n2 <- which(RegionNames == as.character(d0[i,'r2']))
+    min(c(n1,n2))
+})
+
+scan.names <- c('1WK', '3MNTH')
+z_meltCon <- paste(cmObj_melt$z_melt$n1.seed, cmObj_melt$z_melt$n2.seed,sep="_")
+ROIlink <- as.character(unique(z_meltCon))
+ROIlink <- str_split_fixed(ROIlink, "_", 2)
+ROIlink <- as.data.frame(ROIlink)
+
+#Create a data frame with the r2z values for each scan from in network summary
+out <- sapply(unique(netConnObj$ins$acq),function(i){
+  netConnObj$ins$r2z[netConnObj$ins$acq==i]
+})
+rownames(out) <- unique(as.character(netConnObj$ins$network))
+out <- t(out)
+out <- as.data.frame(out)
+
+#Merge out with participant data
+participants <- read.csv(file = #data withheld,
+                         stringsAsFactors = F)
+participants$Num <- c(1:30)
+out$id <- c(1:30)
+out <- merge(out, participants, by.x = "id", by.y = "Num")
+
+#add CIMBI IDs
+out <- merge(out, CIMBIonly, by.x = "id", by.y = "Num")
+out <- rename(out, CIMBI_ID = id)
+out$CIMBI_ID <- as.factor(out$CIMBI_ID)
+out$Condition <- as.factor(out$Condition)
+out$Condition <- factor(out$Condition, levels = c('Baseline', '1 Week', '12 Week'))
+#make the data L  O  N  G
+longout <- gather(out, Network, Connectivity, DefaultMode:Auditory, factor_key = T) #remember to change the names of the networks here
+longout$Network <- factor(longout$Network, levels = NetworkNames)
+```
+
+Establishing all connectivity scores for each region
+
+```{r}
+
+#dd0 is for baseline
+dd0 <- as.data.frame(rbind(as.data.frame(do.call(rbind, lapply(networkNames, function(i){rep(i,2)}))),
+      as.data.frame(do.call(rbind,combn(networkNames, 2, simplify = F))))) 
+colnames(dd0) <- c('r1','r2')
+dd0$nx <- NA 
+dd0$ny <- NA
+dd0$ny <- sapply(seq(nrow(dd0)), function(i){
+    n1 <- which(networkNames == as.character(dd0[i,'r1']))
+    n2 <- which(networkNames == as.character(dd0[i,'r2']))
+    max(c(n1,n2))
+}) 
+
+dd0$nx <- sapply(seq(nrow(dd0)), function(i){
+    n1 <- which(networkNames == as.character(dd0[i,'r1']))
+    n2 <- which(networkNames == as.character(dd0[i,'r2']))
+    min(c(n1,n2))
+})
+
+dd0$r2z <- sapply(seq(nrow(dd0)), function(i){
+  if(dd0[i,'r1']==dd0[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd0[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+      return(mean(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+    return(mean(netConnObj$onr$r2z[matches]))
+  }})
+
+dd0$sd <- sapply(seq(nrow(dd0)), function(i){
+  if(dd0[i,'r1']==dd0[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd0[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+    return(sd(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+    return(sd(netConnObj$onr$r2z[matches]))
+  }})
+
+#dd1 is for 1WK
+dd1 <- as.data.frame(rbind(as.data.frame(do.call(rbind, lapply(networkNames, function(i){rep(i,2)}))),
+      as.data.frame(do.call(rbind,combn(networkNames, 2, simplify = F))))) 
+colnames(dd1) <- c('r1','r2')
+dd1$nx <- NA 
+dd1$ny <- NA
+dd1$ny <- sapply(seq(nrow(dd1)), function(i){
+    n1 <- which(networkNames == as.character(dd1[i,'r1']))
+    n2 <- which(networkNames == as.character(dd1[i,'r2']))
+    max(c(n1,n2))
+}) 
+
+dd1$nx <- sapply(seq(nrow(dd1)), function(i){
+    n1 <- which(networkNames == as.character(dd1[i,'r1']))
+    n2 <- which(networkNames == as.character(dd1[i,'r2']))
+    min(c(n1,n2))
+})
+
+dd1$r2z <- sapply(seq(nrow(dd1)), function(i){
+  if(dd1[i,'r1']==dd1[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd1[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='1WK')
+      return(mean(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd1[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd1[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd1[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd1[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='1WK')
+    return(mean(netConnObj$onr$r2z[matches]))
+  }})
+
+dd1$sd <- sapply(seq(nrow(dd1)), function(i){
+  if(dd1[i,'r1']==dd1[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd1[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='1WK')
+      return(sd(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd1[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd1[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd1[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd1[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='1WK')
+    return(sd(netConnObj$onr$r2z[matches]))
+  }})
+
+
+#dd2 is for 3MNTH
+dd2 <- as.data.frame(rbind(as.data.frame(do.call(rbind, lapply(networkNames, function(i){rep(i,2)}))),
+      as.data.frame(do.call(rbind,combn(networkNames, 2, simplify = F))))) 
+colnames(dd2) <- c('r1','r2')
+dd2$nx <- NA 
+dd2$ny <- NA
+dd2$ny <- sapply(seq(nrow(dd2)), function(i){
+    n1 <- which(networkNames == as.character(dd2[i,'r1']))
+    n2 <- which(networkNames == as.character(dd2[i,'r2']))
+    max(c(n1,n2))
+}) 
+
+dd2$nx <- sapply(seq(nrow(dd2)), function(i){
+    n1 <- which(networkNames == as.character(dd2[i,'r1']))
+    n2 <- which(networkNames == as.character(dd2[i,'r2']))
+    min(c(n1,n2))
+})
+
+dd2$r2z <- sapply(seq(nrow(dd2)), function(i){
+  if(dd2[i,'r1']==dd2[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd2[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='3MNTH')
+      return(mean(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd2[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd2[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd2[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd2[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='3MNTH')
+    return(mean(netConnObj$onr$r2z[matches]))
+  }})
+
+
+dd2$sd <- sapply(seq(nrow(dd2)), function(i){
+  if(dd2[i,'r1']==dd2[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd2[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='3MNTH')
+      return(sd(netConnObj$ins$r2z[matches]))
+  } else {
+    matches <- (as.character(dd2[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd2[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd2[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd2[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='3MNTH')
+    return(sd(netConnObj$onr$r2z[matches]))
+  }})
+
+```
+
+Figures 1 and 5 were made in microsoft powerpoint
+
+Figure 2
+
+```{r}
+BaselineConn <- 
+  ggplot(dd0, aes(ny, nx, fill = r2z)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(r2z, digits=2)), size =5) +
+  scale_fill_gradient2(low = "darkblue", high = "darkred", mid = "white", 
+                       midpoint = 0, limit = c(-0.5,.5), space = "Lab", 
+                       name="Fisher's\nr-to-z", oob = squish) +
+  theme_minimal() + # minimal theme
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle=0, size =12),
+        axis.text.y = element_text(size = 12),
+        legend.title.align = 0.5) +
+  xlab('Network') + ylab('Network') +
+  ggtitle('Functional Connectivity at Baseline') +
+  scale_x_discrete(limits=c("DMN", "DAN", "ECN", "SN", "SMN", "VN", "AN")) +
+  coord_fixed() +
+  scale_y_discrete(limits =c("DMN", "DAN", "ECN", "SN", "SMN", "VN", "AN")) +
+  theme(legend.position = c(0.2, 0.75))
+
+p <- lapply(scan.names, function(j){ #open the lapply loop
+  
+  if(j == "1WK"){titletext <- 'One-Week'} else {titletext <- 'Three-Months'}
+  
+  tmp.bl <- sapply(seq(nrow(dd0)), function(i){
+  if(dd0[i,'r1']==dd0[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd0[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+      return(netConnObj$ins$r2z[matches]) #establish the values that are in network for BL
+  } else {
+    matches <- (as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)=='BL')
+    return(netConnObj$onr$r2z[matches])
+  }}) #establish the values that are out network for BL
+  
+  tmp.fu <- sapply(seq(nrow(dd0)), function(i){
+  if(dd0[i,'r1']==dd0[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd0[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+      return(netConnObj$ins$r2z[matches])
+  } else {
+    matches <- (as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+    return(netConnObj$onr$r2z[matches])
+  }}) #establish the networks for the follow ups where j is the variable that starts as 1WK and changes to 3MNTH
+  
+  diffs <- t(sapply(seq(ncol(tmp.bl)), function(k){
+    fx.u <- mean(tmp.fu[,k]-tmp.bl[,k])
+    pval <- t.test(tmp.bl[,k],tmp.fu[,k],paired=T)$p.value
+    fx.d <- mean(tmp.fu[,k]-tmp.bl[,k])/sd(tmp.fu[,k]-tmp.bl[,k])
+    return(c(fx.u,pval,fx.d))
+  }))
+  colnames(diffs) <- c('groupdiff','pval','cohen')
+  dd0$groupdiff <- diffs[,'groupdiff']
+  dd0$pval <- diffs[,'pval']
+  dd0$cohen <- diffs[,'cohen']
+  dd0$p.corr <- p.adjust(dd0$pval, method = 'holm')
+  
+
+  dd0$celltext <- unlist(lapply(seq(nrow(dd0)), function(i){
+    if(dd0$p.corr[i]<0.05){
+      return(paste0(as.character(round(dd0$cohen[i], digits=1)),'*'))
+    } else {
+      return(as.character(round(dd0$cohen[i], digits=1)))
+    }
+  }))
+  
+  ## create heatmaps
+  return(ggplot(dd0, aes(ny, nx, fill = cohen)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = celltext, color = cohen < -0.5), size=5) +
+    scale_color_manual(guide = FALSE, values = c("black", "white")) +
+    scale_fill_gradient2(low = "darkblue", high = "darkred", mid = "white", 
+                         midpoint = 0, space = "Lab", limit = c(-1,1), 
+                         name="Cohen's d", oob = squish) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(angle=0, size = 12),
+          axis.text.y = element_text(size = 12),
+          legend.title.align = 0.5,
+          legend.position = c(0.2, 0.75))
+          +
+    xlab('Network') + ylab('Network') +
+    ggtitle(paste0('\u0394 Functional Connectivity at ', titletext)) +
+    coord_fixed()+
+    scale_x_discrete(limits=c("DMN", "DAN", "ECN", "SN", "SMN", "VN", "AN")) +
+    scale_y_discrete(limits=c("DMN", "DAN", "ECN", "SN", "SMN", "VN", "AN")))
+})
+
+Wk1ConnChange <- p[[1]]
+Wk12ConnChange <- p[[2]]
+
+BaselineConn <- BaselineConn + labs(tag = "A")
+Wk1ConnChange <- Wk1ConnChange + labs(tag = "B")
+Wk12ConnChange <- Wk12ConnChange + labs(tag = "C")
+
+fig2 <- ggarrange(BaselineConn, Wk1ConnChange, Wk12ConnChange, ncol =3)
+
+fig2
+
+ggsave("figure2.jpeg", path = , plot = fig2, width = 15, height = 5)
+
+```
+
+Figure 3
+
+```{r}
+ExecLongout <- which(longout$Network=="ExecutiveControl")
+ExecLongout <- longout[ExecLongout,]
+ExecLongout$ID <- as.factor(ExecLongout$ID)
+ExecLongout <- ExecLongout %>% select(-CIMBI_ID)
+
+ParticipantNumber$Participant <- as.factor(ParticipantNumber$Participant)
+
+ExecLongout2<-cbind(NA,ExecLongout)
+
+for (i in 1:10){
+  ExecLongout2[ExecLongout2$ID==ParticipantNumber[i,1],1] <- ParticipantNumber[i,2]
+}
+
+ExecLongout2<-ExecLongout2 %>%
+  rename('Participant' = 'NA')
+
+ExecLongout2$Participant <- as.factor(ExecLongout2$Participant)
+
+SDExec <- ExecLongout2 %>% 
+  group_by(Condition) %>%
+  summarise(mean = mean(Connectivity), sd = sd(Connectivity))
+
+fig3 <- ggplot(ExecLongout2, aes(Condition, Connectivity, colour=Participant)) +
+  geom_point() +
+  geom_line(aes(group = ID), alpha = 0.8) +
+  ggtitle("ECN Functional Connectivity") +
+  xlab ("Time") +
+  ylab ("ECN Functional Connectivity\n(r-to-z values)") +
+  scale_x_discrete(labels=c("Baseline" = "Baseline", "1 Week" = "One-Week",
+                              "12 Week" = "Three-Months")) +
+  ylim(0.2, 0.8) +
+  theme(legend.position = "none",
+        plot.caption = element_text(hjust = 0),
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text()) +
+  stat_summary(fun=match.fun(mean), geom="point", aes(group = 1), colour = "black") +
+  geom_errorbar(data = SDExec, mapping = aes(x=Condition, ymin=mean-sd, ymax=mean+sd, group=Condition), width=0.05, size=0.5, color="black", inherit.aes = F)
+  #scale_fill_discrete(labels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+
+fig3
+
+ggsave("figure3.jpeg", path = , plot = fig3, width = 6, height = 5)
+```
+
+Figure 4 - MAAS correlation with ECN change
+
+```{r}
+MAASDiff <- NeoL$FollowUp$maas - NeoL$Baseline$maas
+MAASDiffCorr1WK <- data.frame(ID=CIMBI_ID_list, MAASChange=MAASDiff, ExecChange=ExecDiff1WK)
+MAASDiffCorr12WK <- data.frame(ID=CIMBI_ID_list, MAASChange=MAASDiff, ExecChange=ExecDiff12WK)
+
+#One week corr
+ECN1WkMAAS <- ggplot(data=MAASDiffCorr1WK, aes(MAASDiff, ExecDiff1WK)) +
+  geom_point() +
+  geom_smooth(method='lm', se = F) +
+  ggtitle("Change in ECN RSFC at One-Week and MAAS at Three-Months") +
+  xlab ("Change in MAAS Score") +
+  ylab ("Change in ECN Functional Connectivity") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_flip()
+
+#12 week corr
+ECN14WkMAAS <- ggplot(data=MAASDiffCorr12WK, aes(MAASDiff, ExecDiff12WK)) +
+  geom_point() +
+  geom_smooth(method='lm', se = F) +
+  ggtitle("Change in ECN RSFC and MAAS at Three-Months") +
+  xlab ("Change in MAAS Score") +
+  ylab ("Change in ECN Functional Connectivity") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_flip()
+
+ECN1WkMAAS <- ECN1WkMAAS + labs(tag = "A")
+ECN14WkMAAS <- ECN14WkMAAS + labs(tag = "B")
+ECNMAASCorr <- grid.arrange(ECN1WkMAAS, ECN14WkMAAS, ncol = 2)
+ECNMAASCorr
+ggsave("figure4.jpeg", path = , width=15,height=5, plot = ECNMAASCorr)
+```
+
+Figure 4 - CIMBI36 BPND correlation with ECN change
+
+```{r}
+#Establish x
+CIMBIDiff <- NeoL$FollowUp$neobpnd - NeoL$Baseline$neobpnd
+CIMBIDiffCorr12WK <- data.frame(ID=CIMBI_ID_list, CIMBIChange=CIMBIDiff, ExecChange=ExecDiff12WK)
+
+#12 Week
+CIMBI3MNTHCorr <- ggplot(data=CIMBIDiffCorr12WK, aes(CIMBIDiff, ExecDiff12WK)) +
+  geom_point() +
+  geom_smooth(method='lm', se = F) +
+  ggtitle("Change in ECN Functional Connectivity at Three-Months and 5-HT2AR at One-Week") +
+  xlab ("Change in 5-HT2AR BPND") +
+  ylab ("Change in ECN Functional Connectivity") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggsave("figure5.jpeg", path =  , width=8,height=5, plot = CIMBI3MNTHCorr)
+CIMBI3MNTHCorr
+
+```
+
+Latent variable model (Figure 5)
+Figure constructed in powerpoint
+
+```{r}
+library(lava)
+
+m <- lvm(eta~Wk1ExecChange,
+         life_pos~eta,
+         self_pos~eta,
+         mood_pos~eta,
+         altruistic~eta,
+         behav_pos~eta,
+         spirit_inc~eta
+)
+latent(m) <- ~eta
+m
+e <- estimate(m, data = PEQ)
+summary(e)
+plot(m)
+
+effects(e, life_pos~Wk1ExecChange)
+effects(e, self_pos~Wk1ExecChange)
+effects(e, mood_pos~Wk1ExecChange)
+effects(e, altruistic~Wk1ExecChange)
+effects(e, behav_pos~Wk1ExecChange)
+effects(e, spirit_inc~Wk1ExecChange)
+
+PEQ.scale <- PEQ
+PEQ.scale$life_pos <- scale(PEQ.scale$life_pos)
+PEQ.scale$self_pos <- scale(PEQ.scale$self_pos)
+PEQ.scale$mood_pos <- scale(PEQ.scale$mood_pos)
+PEQ.scale$altruistic <- scale(PEQ.scale$altruistic)
+PEQ.scale$behav_pos <- scale(PEQ.scale$behav_pos)
+PEQ.scale$spirit_inc <- scale(PEQ.scale$spirit_inc)
+
+e.scale <- estimate(m, data = PEQ.scale)
+summary(e.scale)
+
+## iterative evaluation of adding paths to model
+modelsearch(e)
+## model (somewhat) supports additional shared covariance between these measures
+covariance(m) <- mood_pos~altruistic
+# re-estimate model
+e <- estimate(m, data = PEQ)
+summary(e)
+confint(e) # confidence intervals
+plot(e)
+
+```
+
+Replication of ROI-ROI edge analysis
+Note - data must be parcellated by the Shen268 atlas in Connreader before running this chunk
+
+```{r}
+ROIr2z <- lapply(scan.names, function(j) {
+  
+  # extract baseline data
+  tmp.bl <- mclapply(seq(nrow(ROIlink)), function(i){
+    matches <- (as.character(ROIlink[i,'V1'])==as.character(cmObj_melt$z_melt$n1.seed) &
+                  as.character(ROIlink[i,'V2'])==as.character(cmObj_melt$z_melt$n2.seed))
+    matches <- matches & cmObj_melt$z_melt$acq%in%which(as.character(CIMBI_ID$Scan)=='BL') 
+    return(cmObj_melt$z_melt$r2z[matches])
+    },mc.cores=10)
+  
+  # extract either 1WK or 3MNTH (depending on value j)
+  tmp.fu <- mclapply(seq(nrow(ROIlink)), function(i){
+    matches <- (as.character(ROIlink[i,'V1'])==as.character(cmObj_melt$z_melt$n1.seed) &
+                  as.character(ROIlink[i,'V2'])==as.character(cmObj_melt$z_melt$n2.seed))
+    matches <- matches & cmObj_melt$z_melt$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+    return(cmObj_melt$z_melt$r2z[matches])
+    },mc.cores=10)
+  
+  # return both BL and 1WK/3MNTH data as matrices in ROIr2z
+  return(list(tmp.bl=tmp.bl,tmp.fu=tmp.fu))
+  
+  })
+
+# what barrett does
+BarrettHits <- unique(unlist(lapply(c('BL',scan.names),function(j){
+  tmp.vals <- unlist(mclapply(seq(nrow(ROIlink)), function(i){
+    matches <- (as.character(ROIlink[i,'V1'])==as.character(cmObj_melt$z_melt$n1.seed) &
+                  as.character(ROIlink[i,'V2'])==as.character(cmObj_melt$z_melt$n2.seed))
+    matches <- matches & cmObj_melt$z_melt$acq%in%which(as.character(CIMBI_ID$Scan)==j) 
+    tmpvals <- cmObj_melt$z_melt$r2z[matches]
+    return(t.test(tmpvals)$p.value)
+    },mc.cores=10))
+  return(which(p.adjust(tmp.vals,method = 'bonferroni')<0.05))
+  })))
+
+BHvals <- lapply(scan.names, function(j) {  #set up for loop where j moves from BL to 1WK according to the variable above determined
+  
+  # extract baseline data
+  tmp.bl <- mclapply(BarrettHits, function(i){
+    matches <- (as.character(ROIlink[i,'V1'])==as.character(cmObj_melt$z_melt$n1.seed) &
+                  as.character(ROIlink[i,'V2'])==as.character(cmObj_melt$z_melt$n2.seed))
+    matches <- matches & cmObj_melt$z_melt$acq%in%which(as.character(CIMBI_ID$Scan)=='BL') 
+    return(cmObj_melt$z_melt$r2z[matches])
+    },mc.cores=10)
+  
+  # extract either 1WK or 3MNTH (depending on value j)
+  #seq(nrow(ROIlink))
+  tmp.fu <- mclapply(BarrettHits, function(i){
+    matches <- (as.character(ROIlink[i,'V1'])==as.character(cmObj_melt$z_melt$n1.seed) &
+                  as.character(ROIlink[i,'V2'])==as.character(cmObj_melt$z_melt$n2.seed))
+    matches <- matches & cmObj_melt$z_melt$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+    return(cmObj_melt$z_melt$r2z[matches])
+    },mc.cores=10)
+  
+  # return both BL and 1WK/3MNTH data as matrices in ROIr2z
+  return(list(tmp.bl=tmp.bl,tmp.fu=tmp.fu))
+  
+  })
+
+BHdiff <- lapply(seq(length(BHvals)), function(j) {
+  diffs <- sapply(seq(length(BHvals[[j]]$tmp.bl)), function(k){
+    tmpdiff <- BHvals[[j]]$tmp.bl[[k]]-BHvals[[j]]$tmp.fu[[k]]
+    fx.u <- mean(tmpdiff)
+    pval <- t.test(tmpdiff)$p.value
+    fx.d <- mean(tmpdiff)/sd(tmpdiff)
+    return(c(fx.u,pval,fx.d))
+  })
+  rownames(diffs) <- c('groupdiff','pval','cohen')
+  p.corr <- p.adjust(diffs['pval',], method = 'holm')
+  diffOut <- rbind(diffs, p.corr)
+  return(diffOut)
+})
+
+```
+
+Barrett replication pt.2 looking at the numbers
+
+```{r}
+
+#Barrett Diff
+length(BarrettHits)
+#BL vs 1 Wk Cohens larger than 0.8
+length(which(BHdiff[[1]][3,]>0.8))
+length(which(BHdiff[[1]][3,]< -0.8))
+#BL vs 14 Wk Cohens larger than 0.8
+length(which(BHdiff[[2]][3,]>0.8))
+length(which(BHdiff[[2]][3,]< -0.8))
+
+which(BHdiff[[1]][2,]<0.05) #uncorrected
+which(BHdiff[[2]][2,]<0.05)
+which(BHdiff[[1]][4,]<1) #corrected
+which(BHdiff[[2]][4,]<1)
+BHdiff[[1]][4,19] #p = 0.8931
+BHdiff[[2]][4,81] #p = 0.06856
+BHdiff[[2]][4,214] #p = 0.2587
+
+#Same edges at 1wk and 14wk
+which(BHdiff[[1]][2,]<0.05 & BHdiff[[1]][1,]>0 & BHdiff[[2]][2,]<0.05 & BHdiff[[2]][1,]>0)
+which(BHdiff[[1]][2,]<0.05 & BHdiff[[1]][1,]<0 & BHdiff[[2]][2,]<0.05 & BHdiff[[2]][1,]<0)
+
+#Direction of significant changes
+length(which(BHdiff[[1]][2,]<0.05 & BHdiff[[1]][1,]>0))
+length(which(BHdiff[[1]][2,]<0.05 & BHdiff[[1]][1,]<0))
+length(which(BHdiff[[2]][2,]<0.05 & BHdiff[[2]][1,]>0))
+length(which(BHdiff[[2]][2,]<0.05 & BHdiff[[2]][1,]<0))
+
+
+```
+
+Edgewise analysis of Raichle edges. Rerun the above chunk with Raichle2011 parcellation before running this chunk. 
+
+```{r}
+cmObj_melt$z_melt[which(BHdiff[[1]][2,]<0.05),]
+z <- cmObj_melt$z_melt[BarrettHits,]
+z
+tmp <- cmObj_melt$z_melt[cmObj_melt$z_melt$n1.network=="ExecutiveControl" & cmObj_melt$z_melt$within & cmObj_melt$z_melt$acq == 1,]
+
+a <- CIMBI_ID[CIMBI_ID$Scan == "BL",]
+b <- CIMBI_ID[CIMBI_ID$Scan == "1WK",]
+
+a <-  a %>%
+  arrange(ID)
+
+b <-  b %>%
+  arrange(ID)
+
+tmp <- cmObj_melt$z_melt[cmObj_melt$z_melt$n1.network=="ExecutiveControl" & cmObj_melt$z_melt$within & cmObj_melt$z_melt$acq == 1,]
+out <- lapply(seq(nrow(tmp)), function(j){
+  baseline.matches <- cmObj_melt$z_melt$node1 == tmp[j,'node1'] & cmObj_melt$z_melt$node2 == tmp[j,'node2'] & cmObj_melt$z_melt$acq %in% a$Num
+  rescan.matches <- cmObj_melt$z_melt$node1 == tmp[j,'node1'] & cmObj_melt$z_melt$node2 == tmp[j,'node2'] & cmObj_melt$z_melt$acq %in% b$Num
+  tobj <- t.test(cmObj_melt$z_melt[rescan.matches,'r2z'],cmObj_melt$z_melt[baseline.matches,'r2z'], paired = T)
+  return(tobj)
+})
+sapply(out, function(j){j$p.value})
+sapply(out, function(j){j$estimate})
+
+subj.diff <- sapply(seq(nrow(a)), function(j){
+  baseline.matches <- cmObj_melt$z_melt$acq == a$Num[j] & cmObj_melt$z_melt$n1.network=="ExecutiveControl" & cmObj_melt$z_melt$within
+  rescan.matches <- cmObj_melt$z_melt$acq == b$Num[j] & cmObj_melt$z_melt$n1.network=="ExecutiveControl" & cmObj_melt$z_melt$within
+  baseline.vals <- cmObj_melt$z_melt$r2z[baseline.matches]
+  rescan.vals <- cmObj_melt$z_melt$r2z[rescan.matches]
+  return(mean(rescan.vals-baseline.vals))
+})
+
+mean(subj.diff)/sd(subj.diff)
+
+```
+
+Table S1 is constructed manually from the Raichle atlas as published https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3621343/
+
+Table S2 describing the connectivity estimates at each timepoint between networks
+
+```{r}
+Megatable <- dd0
+Megatable <- Megatable %>%
+  rename(baseline_r2z = r2z, baseline_SD = sd, Network_A = r1, Network_B = r2)
+
+Megatable$One_Week_r2z <- dd1$r2z
+Megatable$One_Week_SD <- dd1$sd
+
+Megatable$Fourteen_Week_r2z <- dd2$r2z
+Megatable$Fourteen_Week_SD <- dd2$sd
+
+#then we get the group diff, pval, cohens and pcorr from the diffs created in p
+
+#Establish diffs by changing j to 1WK or 3MNTH in the chunk up there then running the chunk to make tmp.fu the appropriate timepoint
+
+j <- "1WK"
+
+tmp.fu <- sapply(seq(nrow(dd0)), function(i){
+  if(dd0[i,'r1']==dd0[i,'r2']){
+    matches <- as.character(netConnObj$ins$network)==as.character(dd0[i,'r1']) & netConnObj$ins$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+      return(netConnObj$ins$r2z[matches])
+  } else {
+    matches <- (as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n1.network) &
+                  as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n2.network)) |
+      (as.character(dd0[i,'r2'])==as.character(netConnObj$onr$n1.network) &
+         as.character(dd0[i,'r1'])==as.character(netConnObj$onr$n2.network))
+    matches <- matches & netConnObj$onr$acq%in%which(as.character(CIMBI_ID$Scan)==j)
+    return(netConnObj$onr$r2z[matches])
+  }}) #establish the networks for the follow ups where j is the variable that starts as 1WK and changes to 3MNTH
+    
+    
+  diffs <- t(sapply(seq(ncol(tmp.bl)), function(k){
+    fx.u <- mean(tmp.fu[,k]-tmp.bl[,k])
+    pval <- t.test(tmp.bl[,k],tmp.fu[,k],paired=T)$p.value
+    fx.d <- mean(tmp.fu[,k]-tmp.bl[,k])/sd(tmp.fu[,k]-tmp.bl[,k])
+    return(c(fx.u,pval,fx.d))
+  }))
+  colnames(diffs) <- c('groupdiff','pval','cohen')
+
+#One you have set diffs to either be 1WK or 3MNTH based, run the respective chunk below
+
+#1WK
+  Megatable$One_Week_Change <- diffs[,'groupdiff']
+  Megatable$One_Week_pval <- diffs[,'pval']
+  Megatable$One_Week_CohensD <- diffs[,'cohen']
+  Megatable$One_Week_pcorr <- p.adjust(Megatable$One_Week_pval, method = 'holm')
+  
+#3MNTH  
+  Megatable$Fourteen_Week_Change <- diffs[,'groupdiff']
+  Megatable$Fourteen_Week_pval <- diffs[,'pval']
+  Megatable$Fourteen_Week_CohensD <- diffs[,'cohen']
+  Megatable$Fourteen_Week_pcorr <- p.adjust(Megatable$Fourteen_Week_pval, method = 'holm')
+  
+Megatable <- Megatable %>%
+  select(-nx, -ny)
+
+#Output as excel
+write_xlsx(Megatable, )
+
+PubMegatable <- Megatable %>%
+  mutate(Network_A=recode(Network_A, 'DefaultMode' = 'DMN'),
+         Network_A=recode(Network_A, 'DorsalAttention' = 'DAN'),
+         Network_A=recode(Network_A, 'ExecutiveControl' = 'ECN'),
+         Network_A=recode(Network_A, 'Salience' = 'SN'),
+         Network_A=recode(Network_A, 'SensoriMotor' = 'SMN'),
+         Network_A=recode(Network_A, 'Visual' = 'VN'),
+         Network_A=recode(Network_A, 'Auditory' = 'AN'),
+         Network_B=recode(Network_B, 'DefaultMode' = 'DMN'),
+         Network_B=recode(Network_B, 'DorsalAttention' = 'DAN'),
+         Network_B=recode(Network_B, 'ExecutiveControl' = 'ECN'),
+         Network_B=recode(Network_B, 'Salience' = 'SN'),
+         Network_B=recode(Network_B, 'SensoriMotor' = 'SMN'),
+         Network_B=recode(Network_B, 'Visual' = 'VN'),
+         Network_B=recode(Network_B, 'Auditory' = 'AN')) %>%
+  mutate(across(3:16, round, 3)) %>%
+  unite(Baseline_r2z, baseline_r2z, baseline_SD, sep = "\u00b1") %>%
+  unite(One_Week_r2z, One_Week_r2z, One_Week_SD, sep = "\u00b1") %>%
+  unite(Three_Month_r2z, Fourteen_Week_r2z, Fourteen_Week_SD, sep = "\u00b1") %>%
+  unite(Edge, Network_A, Network_B, sep = " to ") %>%
+  relocate(Three_Month_r2z, .after = One_Week_pcorr) %>%
+  rename(Three_Month_Change = Fourteen_Week_Change, Three_Month_pval = Fourteen_Week_pval, Three_Month_CohensD = Fourteen_Week_CohensD, Three_Month_pcorr = Fourteen_Week_pcorr )
+
+write_xlsx(PubMegatable, )
+
+t <- t.test(tmp.bl[,1], tmp.fu[,1], paired=T)
+t$conf.int
+
+```
+
+Table S3 ECN Correlations
+
+Data may be available upon request
+
+Calculating the correlations between Executive Control Network connectivity and psychological/PET measures
+
+```{r}
+NEOPIR <- read.csv#data withheld, head = TRUE, sep=";"
+NEOPIR #NEOPIR data
+out #Within Network Connectivity data
+
+#change to list
+NeoL <-list(Baseline=NEOPIR[NEOPIR$time=='Baseline',], FollowUp=NEOPIR[NEOPIR$time=='Follow-up',])
+out <- out[order(out$ID),]
+
+#Break out into lists
+outL1WK <- list(Baseline=out[out$Condition=='Baseline',], FollowUp=out[out$Condition=='1 Week',])
+outL12WK <- list(Baseline=out[out$Condition=='Baseline',], FollowUp=out[out$Condition=='12 Week',])
+
+#Establish changes from baseline
+ExecDiff1WK <- outL1WK$FollowUp$ExecutiveControl - outL1WK$Baseline$ExecutiveControl
+ExecDiff12WK <- outL12WK$FollowUp$ExecutiveControl - outL12WK$Baseline$ExecutiveControl
+
+#load table
+mastertable <- #data withheld
+NEOPIR <- #data withheld
+
+#change to list
+NeoL <-list(Baseline=NEOPIR[NEOPIR$time=='Baseline',], FollowUp=NEOPIR[NEOPIR$time=='Follow-up',])
+
+#only take the CIMBI IDs for this study
+P2mastertable <- mastertable[is.element(dose_data$'CIMBI.ID...1',CIMBI_ID_list), ]
+
+longout <- longout[order(longout$ID),]
+exec <- longout[longout$Network=='ExecutiveControl',]
+exec <- list(Baseline=exec[exec$Condition=='Baseline',], OneWeek=exec[exec$Condition=='1 Week',], TwelveWeeks=exec[exec$Condition=='12 Week',])
+
+Wk1ExecChange <- exec$OneWeek$Connectivity -  exec$Baseline$Connectivity
+Wk12ExecChange <- exec$TwelveWeeks$Connectivity -  exec$Baseline$Connectivity
+
+P2MEQ <-rename(P2MEQ, 'MEQTotal'  = "MEQ30 - Total score (0-5)")
+
+P2NEOPIR.BL <- P2mastertable %>%
+  select("CIMBI ID","N: Neuroticism", "E: Extraversion...73", "O: Openness...80" ,  "A: Agreeableness...87", "C: Conscientiousness...94"  )
+
+P2NEOPIR.FU <- P2mastertable %>%
+  select("CIMBI ID","N: Neuroticism2", "E: Extraversion...237", "O: Openness...244" ,  "A: Agreeableness...251", "C: Conscientiousness...258")
+
+Neuroticism <- P2NEOPIR.BL$`N: Neuroticism` - P2NEOPIR.FU$`N: Neuroticism2`
+P2NEOPIR.DIFFS <- as.data.frame(Neuroticism)
+
+P2NEOPIR.DIFFS$Extraversion <- P2NEOPIR.BL$`E: Extraversion...73` - P2NEOPIR.FU$`E: Extraversion...237`
+P2NEOPIR.DIFFS$Openness <- P2NEOPIR.BL$`O: Openness...80` - P2NEOPIR.FU$`O: Openness...244`
+P2NEOPIR.DIFFS$Agreeableness <- P2NEOPIR.BL$`A: Agreeableness...87` - P2NEOPIR.FU$`A: Agreeableness...251`
+P2NEOPIR.DIFFS$Conscientiousness <- P2NEOPIR.BL$`C: Conscientiousness...94` - P2NEOPIR.FU$`C: Conscientiousness...258`
+
+MAASDiff <- NeoL$FollowUp$maas - NeoL$Baseline$maas
+CIMBIDiff <- NeoL$FollowUp$neobpnd - NeoL$Baseline$neobpnd
+
+
+P2CorrAcute <- P2mastertable %>% 
+  select("CIMBI ID","EDI - Mean score (0-100)","5D-ASC - Subscale: Experience of Unity(0-100)","5D-ASC - Subscale: Spiritual Experience (0-100)","5D-ASC - Subscale: Blissful State (0-100)",     "5D-ASC - Subscale: Insightfulness (0-100)",                   "5D-ASC - Subscale: Disembodiment (0-100)" ,           "5D-ASC - Subscale: Impaired Control and Cognition (0-100)" ,  "5D-ASC - Subscale: Anxiety (0-100)"  ,                       
+"5D-ASC - Subscale: Complex Imagery (0-100)"   ,               "5D-ASC - Subscale: Elementary Imagery (0-100)", "AUC" , "AUCnorm","highIndensityDuration" ,"plateauDuration" , "MEQ30 - Factor score: Mystical (0-5)"   , "MEQ30 - Factor score: Positive mood (0-5)" , "MEQ30 - Factor score: Transcendence of time and space (0-5)", "MEQ30 - Factor score: Ineffability (0-5)"    , "MEQ30 - Total score (0-5)")
+
+P2Corr <- cbind(P2NEOPIR.DIFFS, P2CorrAcute, MAASDiff, CIMBIDiff, Wk1ExecChange, Wk12ExecChange,Wk1_to_3mnth_ExecChange)
+colnames(P2Corr) <- unlist(lapply(colnames(P2Corr), function(i){
+  if(grepl('^([0-9])',i)){i <- paste0('X',i)}
+  i <- gsub(' ','',i,fixed=T)
+  i <- gsub('-','.',i)
+  i <- gsub(':','.',i)
+  i <- gsub('[(]','_',i)
+  i <- gsub(')','_',i)
+  i <- gsub('[$]','_',i)
+  return(i)
+}))
+
+#We establish the pearsons rho and the confidence intervals from the cor.test and pvalue
+
+Corr1wk <- lapply(colnames(P2Corr), function(k){
+  if(k%in%c('CIMBIID','Wk1ExecChange')){return(NULL)}
+  f <- paste0('Wk1ExecChange~',k)
+  l <- lm(f, data=P2Corr)
+  c <- cor.test(P2NEOPIR$Wk1ExecChange, P2Corr[[k]], method = "pearson")
+  vals <- c(c$estimate, 
+            c$conf.int[1],
+            c$conf.int[2],
+            c$p.value
+            )
+  return(vals)
+})
+out <- do.call(rbind,Corr1wk)
+out <- data.frame(out)
+colnames(out) <- c('r','lwr','upr', 'p')
+out$measure <- colnames(P2Corr)[!colnames(P2Corr)%in%c('CIMBIID','Wk1ExecChange')]
+write_xlsx(out, )
+
+#12 weeks
+
+Corr12wk <- lapply(colnames(P2Corr), function(k){
+  if(k%in%c('CIMBIID','Wk12ExecChange')){return(NULL)}
+  f <- paste0('Wk12ExecChange~',k)
+  l <- lm(f, data=P2Corr)
+  c <- cor.test(P2NEOPIR$Wk12ExecChange, P2Corr[[k]])
+  vals <- c(c$estimate, 
+            c$conf.int[1],
+            c$conf.int[2],
+            c$p.value
+            )
+  return(vals)
+})
+out <- do.call(rbind,Corr12wk)
+out <- data.frame(out)
+colnames(out) <- c('r','Corr.lwr','Corr.upr', 'p')
+out$measure <- colnames(P2Corr)[!colnames(P2Corr)%in%c('CIMBIID','Wk12ExecChange')]
+write_xlsx(out, )
+
+```
